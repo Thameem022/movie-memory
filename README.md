@@ -248,19 +248,22 @@ message that suits the reason. Failures are never saved as facts.
 
 ### Tests
 
-`npm test` runs 141 Vitest tests. Prisma and OpenAI are mocked, so no
-database or API key is needed.
+`npm test` runs 24 Vitest tests covering the two areas the brief asks for.
+Prisma and OpenAI are mocked, so no database or API key is needed.
 
 | File | Covers |
 |---|---|
-| `lib/facts.test.ts` | Cache window (59.999 s cached, 60 s regenerated, other movies ignored); the lock (exact conditions, release on every path, owner-only release, second check, waiting requests); five simultaneous requests against a fake database; crashed-lock takeover; OpenAI failure fallback |
-| `lib/authorization.test.ts` | Two users with the same movie: session → dashboard → fact service. No user ever receives, reuses, waits for or falls back to another user's fact, or is blocked by their lock; `?userId=` in the URL is ignored |
-| `lib/openai.test.ts` | Request shape, error mapping, reply checks, refusals, unknown films, no secrets in logs, log levels |
-| `lib/validation.test.ts`, `app/onboarding/actions.test.ts` | Input validation, first-time-only onboarding, session-only user id |
+| `lib/facts.test.ts` | **60-second cache:** a fact 0 ms to 59.999 s old is returned with no OpenAI call and nothing stored; at exactly 60 s and beyond, a new fact is generated, stored and returned; with no earlier fact a new one is generated; a fresh fact for a different movie is never reused; the lookup is scoped to this user and movie |
+| `lib/authorization.test.ts` | **Authorization**, with two users who share a favourite movie: session → dashboard → fact service. No user ever receives, reuses, waits for or falls back to another user's fact, or is blocked by their lock; `?userId=` in the URL is ignored |
 
 The authorization tests were checked by breaking the code on purpose:
 removing `userId` from the fact lookup, or letting the dashboard read
 `?userId=`, makes them fail.
+
+Burst protection and failure handling were checked by hand against the real
+Postgres database (five simultaneous requests → one OpenAI call and one row;
+a failing OpenAI call → the earlier fact is shown, nothing stored, lock
+released). They have no automated tests.
 
 ---
 
@@ -295,9 +298,10 @@ reason about carefully and test.
 - **Plain-text replies with an `UNKNOWN` signal, instead of structured JSON
   output.** Less code and no schema dependency, but refusal detection uses a
   simple pattern match.
-- **Tests mock Prisma and OpenAI.** They are fast and need no setup, but they
-  prove the logic, not Postgres's locking. That part was checked once by hand
-  against the real database.
+- **Tests cover only what the brief asks for:** the cache window and
+  authorization. They mock Prisma and OpenAI, so they are fast and need no
+  setup. The lock and the failure fallback were checked by hand against the
+  real database rather than by automated tests.
 
 ## Known limitations
 
@@ -312,9 +316,10 @@ reason about carefully and test.
 
 ## What I would improve with 2 more hours
 
-1. **A Postgres integration test for the lock**, run in CI against a real
-   database: fire `Promise.all` of five requests and assert one OpenAI call and
-   one row. This turns the one-off manual check into a permanent proof.
+1. **Automated tests for the lock and the failure fallback**, including a
+   Postgres integration test run in CI against a real database: fire
+   `Promise.all` of five requests and assert one OpenAI call and one row. This
+   turns the one-off manual checks into permanent proof.
 2. **Remember unknown films** so an unrecognised title doesn't call OpenAI on
    every visit.
 3. **Stop waiting early when the winner fails**, by also checking the lock in
@@ -329,14 +334,50 @@ reason about carefully and test.
 
 ## AI usage
 
-- Used Claude Code (Anthropic) as a pair programmer throughout: to read the
-  brief, plan each step before writing code, and discuss tradeoffs (schema
-  design, the lock options, failure behaviour).
-- AI drafted most of the OpenAI wrapper, the fact service, the lock and the
-  tests. I reviewed every change, asked for the reasoning behind each design
-  decision, and made the product calls: English-only replies, how to handle
-  films that share a title, and log levels that don't flood dev with errors.
-- Every step was checked by more than the unit tests: running the app with a
-  real key, inspecting the rows in Postgres, a one-off concurrency check
-  against the real database, and deliberately breaking the authorization code
-  to confirm the tests catch it.
+I used AI (Claude Code) as a pair programmer and reviewer, in small, checked
+steps rather than "build the whole app".
+
+**Where AI helped**
+
+- **Scaffolding and boilerplate:** the Next.js setup, NextAuth with the Prisma
+  adapter, Tailwind layouts and the env template. I checked API snippets
+  against the official docs, because AI often mixes up NextAuth v4 and v5.
+- **Unfamiliar APIs:** the OpenAI SDK's Responses API, Prisma 7 changes (such
+  as `migrate dev` no longer generating the client) and streaming with
+  `<Suspense>` in Next.js 16. I checked these against the docs installed with
+  the packages, not from memory.
+- **Learning before building:** before writing burst protection, I had AI
+  explain race conditions, conditional updates and locks that expire, and
+  compare the four approaches in the brief.
+- **Drafting code, one piece at a time:** plan first, then one step at a time
+  (schema, OpenAI wrapper, fact service, cache, lock, fallback), with AI
+  drafting the code for each step and me reviewing it before moving on.
+- **Tests:** I decided what to test (the cache window and authorization, as
+  the brief asks). AI did the setup work: mocking Prisma and OpenAI, fake
+  timers for the 60-second window, and a two-user fake database.
+- **Review:** I asked about edge cases (films that don't exist, titles shared
+  by a Malayalam original and its Kannada remake, refusals) and about race
+  conditions and authorization holes. AI helped find and fix them.
+- **README:** AI turned my decisions into this document, which I then edited.
+
+**What I owned**
+
+- **Design decisions:** Variant A; the schema (I can say why every column and
+  index exists); a lock that expires, over an advisory lock, a transaction or
+  a time-window constraint; reusing an earlier fact of any age when OpenAI
+  fails; English-only facts; picking the best-known film when titles clash;
+  and production-style log levels.
+- **Authorization:** every query is scoped to the session user's id. I checked
+  that the tests fail when that scoping is removed.
+- **Verification:** I ran every piece before moving on. That meant real
+  OpenAI calls, inspecting the rows in Postgres, a one-off check that five
+  simultaneous requests make one OpenAI call, and deliberately breaking the
+  authorization code.
+
+**Rules I followed**
+
+- No code I couldn't explain line by line. When something wasn't clear (the
+  race condition, why the conditional `UPDATE` claims the lock in one atomic
+  step, the cached OpenAI client), I asked "explain why this works" until it
+  was.
+- Plan first, then small pieces, so each one could be checked on its own.
