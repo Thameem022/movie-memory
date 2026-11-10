@@ -1,34 +1,55 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { findUnique, create, generateMovieFact } = vi.hoisted(() => ({
+const { findUnique, findFirst, create, generateMovieFact } = vi.hoisted(() => ({
   findUnique: vi.fn(),
+  findFirst: vi.fn(),
   create: vi.fn(),
   generateMovieFact: vi.fn(),
 }));
 
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/prisma", () => ({
-  prisma: { user: { findUnique }, fact: { create } },
+  prisma: { user: { findUnique }, fact: { findFirst, create } },
 }));
 vi.mock("@/lib/openai", () => ({ generateMovieFact }));
 
-import { factErrorMessage, getFactForUser, type FactErrorReason } from "@/lib/facts";
+import {
+  FACT_CACHE_TTL_MS,
+  factErrorMessage,
+  getFactForUser,
+  isFresh,
+  type FactErrorReason,
+} from "@/lib/facts";
 
-const createdAt = new Date("2026-11-10T12:00:00Z");
+// The frozen "current time" for every test.
+const NOW = new Date("2026-11-10T12:00:00.000Z");
+const ago = (ms: number) => new Date(NOW.getTime() - ms);
+
+function storedFact(ageMs: number, movie = "Spirited Away") {
+  return { content: "An earlier fact.", movie, createdAt: ago(ageMs) };
+}
 
 describe("getFactForUser", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Fake only Date, so promises and timers behave normally.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
     vi.spyOn(console, "info").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
     findUnique.mockResolvedValue({ favoriteMovie: "Spirited Away" });
+    findFirst.mockResolvedValue(null);
     generateMovieFact.mockResolvedValue({ ok: true, fact: "A fun fact." });
     create.mockImplementation(async ({ data }) => ({
       content: data.content,
       movie: data.movie,
-      createdAt,
+      createdAt: data.createdAt,
     }));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("generates a fact for the user's saved movie, stores it and returns it", async () => {
@@ -41,12 +62,78 @@ describe("getFactForUser", () => {
     expect(generateMovieFact).toHaveBeenCalledWith("Spirited Away");
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: { userId: "user-1", movie: "Spirited Away", content: "A fun fact." },
+        data: { userId: "user-1", movie: "Spirited Away", content: "A fun fact.", createdAt: NOW },
       }),
     );
     expect(result).toEqual({
       status: "fresh",
-      fact: { content: "A fun fact.", movie: "Spirited Away", createdAt },
+      fact: { content: "A fun fact.", movie: "Spirited Away", createdAt: NOW },
+    });
+  });
+
+  describe("60-second cache window", () => {
+    it("looks up the latest fact for this user and this movie only", async () => {
+      await getFactForUser("user-1");
+      expect(findFirst).toHaveBeenCalledWith({
+        where: { userId: "user-1", movie: "Spirited Away" },
+        orderBy: { createdAt: "desc" },
+        select: { content: true, movie: true, createdAt: true },
+      });
+    });
+
+    it.each([0, 1, 30_000, FACT_CACHE_TTL_MS - 1])(
+      "returns the stored fact without calling OpenAI when it is %i ms old",
+      async (age) => {
+        const fact = storedFact(age);
+        findFirst.mockResolvedValue(fact);
+
+        expect(await getFactForUser("user-1")).toEqual({ status: "cached", fact });
+        expect(generateMovieFact).not.toHaveBeenCalled();
+        expect(create).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([FACT_CACHE_TTL_MS, FACT_CACHE_TTL_MS + 1, 61_000, 3_600_000])(
+      "generates, stores and returns a new fact when the latest is %i ms old",
+      async (age) => {
+        findFirst.mockResolvedValue(storedFact(age));
+
+        const result = await getFactForUser("user-1");
+        expect(generateMovieFact).toHaveBeenCalledTimes(1);
+        expect(create).toHaveBeenCalledTimes(1);
+        expect(result).toEqual({
+          status: "fresh",
+          fact: { content: "A fun fact.", movie: "Spirited Away", createdAt: NOW },
+        });
+      },
+    );
+
+    it("generates a fact when there is no earlier one", async () => {
+      findFirst.mockResolvedValue(null);
+      expect((await getFactForUser("user-1")).status).toBe("fresh");
+      expect(generateMovieFact).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not reuse a fresh fact stored for a different movie", async () => {
+      // The query filters on movie, so a fact for another title never comes
+      // back. Simulate the database honouring that filter.
+      findFirst.mockImplementation(async ({ where }) =>
+        where.movie === "Alien" ? storedFact(1_000, "Alien") : null,
+      );
+      expect((await getFactForUser("user-1")).status).toBe("fresh");
+      expect(generateMovieFact).toHaveBeenCalledWith("Spirited Away");
+    });
+
+    it("does not look up facts when there is no saved movie", async () => {
+      findUnique.mockResolvedValue({ favoriteMovie: null });
+      await getFactForUser("user-1");
+      expect(findFirst).not.toHaveBeenCalled();
+    });
+
+    it("returns database_error and calls nothing when the fact lookup fails", async () => {
+      findFirst.mockRejectedValue(new Error("connection reset"));
+      expect(await getFactForUser("user-1")).toEqual({ status: "error", reason: "database_error" });
+      expect(generateMovieFact).not.toHaveBeenCalled();
     });
   });
 
@@ -93,6 +180,14 @@ describe("getFactForUser", () => {
       status: "fresh",
       fact: { content: "A fun fact.", movie: "Spirited Away" },
     });
+  });
+});
+
+describe("isFresh", () => {
+  it("is true just under 60 seconds and false at exactly 60", () => {
+    expect(isFresh(ago(FACT_CACHE_TTL_MS - 1), NOW)).toBe(true);
+    expect(isFresh(ago(FACT_CACHE_TTL_MS), NOW)).toBe(false);
+    expect(isFresh(ago(FACT_CACHE_TTL_MS + 1), NOW)).toBe(false);
   });
 });
 
