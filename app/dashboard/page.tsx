@@ -1,5 +1,7 @@
+import { Suspense } from "react";
 import { redirect } from "next/navigation";
 import { SignOutButton } from "@/components/auth-buttons";
+import { FunFact, FunFactSkeleton } from "@/components/fun-fact";
 import { getCurrentUser } from "@/lib/session";
 
 export default async function Dashboard() {
@@ -8,7 +10,7 @@ export default async function Dashboard() {
   // First-time users (including ones who left before finishing) onboard first.
   if (!user.favoriteMovie) redirect("/onboarding");
 
-  const { name, email, image, favoriteMovie } = user;
+  const { id, name, email, image, favoriteMovie } = user;
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
@@ -33,6 +35,10 @@ export default async function Dashboard() {
           </p>
           <p className="mt-1 break-words font-medium text-gray-900">{favoriteMovie}</p>
         </div>
+        {/* Streams in after the profile, so OpenAI's latency doesn't hold the page. */}
+        <Suspense fallback={<FunFactSkeleton />}>
+          <FunFact userId={id} />
+        </Suspense>
         <SignOutButton />
       </div>
     </main>

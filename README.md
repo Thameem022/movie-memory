@@ -22,7 +22,13 @@ NEXTAUTH_SECRET=""
 GOOGLE_CLIENT_ID=""
 GOOGLE_CLIENT_SECRET=""
 OPENAI_API_KEY=""
+# Optional. Defaults to gpt-4.1-mini. Use a non-reasoning model: replies are
+OPENAI_MODEL=""
 ```
+
+`OPENAI_API_KEY` is only read on the server (`lib/openai.ts` imports
+`server-only`), so it never reaches the browser bundle. Don't prefix it with
+`NEXT_PUBLIC_`.
 
 ## Database migrations
 
