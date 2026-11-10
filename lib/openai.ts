@@ -69,13 +69,20 @@ export type FactGenerationResult =
   | { ok: false; reason: FactFailureReason };
 
 let client: OpenAI | null = null;
+// The key `client` was created with.
+let clientKey: string | null = null;
 
 // Created on first use, so a missing key fails one request instead of
-// crashing the import (and the build).
+// crashing the import (and the build). Reused across requests, but created
+// again if the key changes (e.g. after editing .env in development), so a new
+// key takes effect without a restart.
 function getClient(): OpenAI | null {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
-  client ??= new OpenAI({ apiKey, timeout: OPENAI_TIMEOUT_MS, maxRetries: 0 });
+  if (!client || clientKey !== apiKey) {
+    client = new OpenAI({ apiKey, timeout: OPENAI_TIMEOUT_MS, maxRetries: 0 });
+    clientKey = apiKey;
+  }
   return client;
 }
 

@@ -28,9 +28,15 @@ export async function FunFact({ userId }: { userId: string }) {
     );
   }
 
+  // "fresh" and "cached" look the same: the user doesn't need to know which.
   return (
     <FactCard>
       <p className="break-words text-sm leading-relaxed text-gray-900">{result.fact.content}</p>
+      {result.status === "stale" && (
+        <p className="mt-2 text-xs text-gray-500">
+          Showing an earlier fact. Refresh in a moment for a new one.
+        </p>
+      )}
     </FactCard>
   );
 }

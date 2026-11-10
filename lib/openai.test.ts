@@ -126,6 +126,21 @@ describe("generateMovieFact", () => {
     });
   });
 
+  it("creates a new client when the key changes, without a restart", async () => {
+    vi.resetModules();
+    const fresh = await import("@/lib/openai");
+    await fresh.generateMovieFact("Up");
+
+    // The key is replaced in .env while the server keeps running.
+    process.env.OPENAI_API_KEY = "sk-new";
+    await fresh.generateMovieFact("Up");
+    await fresh.generateMovieFact("Up");
+
+    expect(constructorOptions).toHaveBeenCalledTimes(2);
+    expect(constructorOptions.mock.calls[0][0]).toMatchObject({ apiKey: "sk-test" });
+    expect(constructorOptions.mock.calls[1][0]).toMatchObject({ apiKey: "sk-new" });
+  });
+
   it("does not call OpenAI for an invalid title", async () => {
     expect(await generateMovieFact("   ")).toEqual({ ok: false, reason: "invalid_input" });
     expect(await generateMovieFact("a".repeat(101))).toEqual({ ok: false, reason: "invalid_input" });

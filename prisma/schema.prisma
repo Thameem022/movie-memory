@@ -20,6 +20,10 @@ model User {
   // Null until the user finishes onboarding. The length limit matches
   // MOVIE_MAX_LENGTH in lib/validation.ts.
   favoriteMovie String?   @db.VarChar(100)
+  // Lease for fact generation: set while one request is calling OpenAI for
+  // this user, so other tabs don't call it too. Null or in the past means
+  // free. It expires on its own if the request holding it crashes.
+  factLockUntil DateTime?
 
   accounts Account[]
   sessions Session[]
